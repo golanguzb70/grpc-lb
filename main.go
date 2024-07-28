@@ -16,13 +16,14 @@ type LB interface {
 
 type lb struct {
 	conns                   []*grpc.ClientConn
-	size                    int
-	offset                  int
+	size                    uint32
+	offset                  uint32
 	factory                 func() (*grpc.ClientConn, error)
 	mutex                   sync.Mutex
 	lastReset               time.Time
-	minRetryIntervalSeconds uint
+	minRetryIntervalSeconds uint32
 	logger                  func(msg string)
+	useCount                uint64
 }
 
 /*
@@ -32,10 +33,10 @@ will manage. The size parameter determines how many connections the load
 balancer will manage. The factory function must return a new connection each
 time it is called. The size parameter must be greater than 0.
 */
-func New(size int, minRetryIntervalSeconds uint, factory func() (*grpc.ClientConn, error), logger func(msg string)) (LB, error) {
+func New(size uint32, minRetryIntervalSeconds uint32, factory func() (*grpc.ClientConn, error), logger func(msg string)) (LB, error) {
 	switch {
 	case factory == nil:
-		return nil, errors.New("factory can't be nil")
+		return nil, errors.New("factory can't be nil3")
 	case size <= 0:
 		return nil, errors.New("size must be greater than 0")
 	case minRetryIntervalSeconds <= 0:
@@ -43,7 +44,7 @@ func New(size int, minRetryIntervalSeconds uint, factory func() (*grpc.ClientCon
 	}
 
 	conns := make([]*grpc.ClientConn, size)
-	for i := 0; i < size; i++ {
+	for i := uint32(0); i < size; i++ {
 		conn, err := factory()
 		if err != nil {
 			return nil, err
@@ -61,6 +62,7 @@ func New(size int, minRetryIntervalSeconds uint, factory func() (*grpc.ClientCon
 		lastReset:               time.Now().UTC(),
 		minRetryIntervalSeconds: minRetryIntervalSeconds,
 		logger:                  logger,
+		useCount:                0,
 	}, nil
 }
 
@@ -77,7 +79,7 @@ func (o *lb) Get() *grpc.ClientConn {
 
 	conn := o.conns[o.offset]
 
-	if conn.GetState() != connectivity.Ready {
+	if conn.GetState() != connectivity.Ready && o.useCount > uint64(o.offset) {
 		if time.Now().UTC().Sub(o.lastReset) > time.Duration(o.minRetryIntervalSeconds)*time.Second {
 			o.lastReset = time.Now().UTC()
 			if err := o.reset(); err != nil {
@@ -92,6 +94,7 @@ func (o *lb) Get() *grpc.ClientConn {
 	}
 
 	o.offset = (o.offset + 1) % o.size
+	o.useCount++
 	return conn
 }
 
@@ -115,7 +118,7 @@ connections using the factory function. If any of the connections fail to close
 or if any of the new connections fail to be created, an error is returned.
 */
 func (o *lb) reset() error {
-	for i := 0; i < o.size; i++ {
+	for i := uint32(0); i < o.size; i++ {
 		if err := o.conns[i].Close(); err != nil {
 			return err
 		}
